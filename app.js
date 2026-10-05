@@ -4,7 +4,17 @@ import { DIET, QUICK } from './diet.js';
 
 const app = document.getElementById('app');
 const configured = !SUPABASE_URL.startsWith('INCOLLA') && !SUPABASE_ANON_KEY.startsWith('INCOLLA');
-const sb = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+// "Resta connesso": la sessione va in localStorage (resta) o in sessionStorage (finisce alla chiusura)
+const remember = () => { try { return localStorage.getItem('remember') !== '0'; } catch { return true; } };
+const authStorage = {
+  getItem(k) { try { return localStorage.getItem(k) ?? sessionStorage.getItem(k); } catch { return null; } },
+  setItem(k, v) { try { (remember() ? localStorage : sessionStorage).setItem(k, v); } catch { /* niente */ } },
+  removeItem(k) { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch { /* niente */ } },
+};
+const sb = configured
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: authStorage, persistSession: true, autoRefreshToken: true } })
+  : null;
 
 // ---------- utilità ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -180,6 +190,9 @@ function renderLogin() {
       <input id="l-email" name="email" type="email" autocomplete="username" required>
       <label class="f" for="l-pass">Password</label>
       <input id="l-pass" name="password" type="password" autocomplete="current-password" required>
+      <label class="f" style="display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--ink);font-size:15px">
+        <input id="l-remember" name="remember" type="checkbox" style="width:auto" ${remember() ? 'checked' : ''}> Resta connesso
+      </label>
       <p style="margin:14px 0 0"><button class="btn full">Entra</button></p>
     </form></div>`;
 }
@@ -587,6 +600,7 @@ app.addEventListener('submit', async (e) => {
   try {
     switch (form.dataset.form) {
       case 'login': {
+        store.set('remember', fd.remember ? '1' : '0');
         const { data, error } = await sb.auth.signInWithPassword({ email: fd.email.trim(), password: fd.password });
         if (error) { toast('Email o password sbagliate'); break; }
         await start(data.user);
