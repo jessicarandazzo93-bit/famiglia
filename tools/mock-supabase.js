@@ -2,7 +2,7 @@
 const ME = 'u-me', HIM = 'u-him';
 const db = {
   profiles: [{ id: ME, name: 'Mamma' }, { id: HIM, name: 'Papà' }],
-  app_settings: [{ key: 'rifiuti', value: { days: { 1: ['umido'], 3: ['plastica', 'carta'], 5: ['umido', 'vetro'] }, when: 'sera', time: '20:30' } }],
+  app_settings: [{ key: 'rifiuti', value: { days: { 0: ['umido', 'pannolini'], 1: ['carta'], 2: ['indiff', 'pannolini'], 3: ['umido', 'vetro'], 4: ['plastica', 'pannolini'], 5: ['umido'] }, alt: { 2: '2026-10-07' }, when: 'sera', time: '20:30' } }],
   user_settings: [{ user_id: ME, follows_diet: true, height_cm: 159, goal_kg: 90 }],
   shopping_items: [
     { id: 1, name: 'Pannolini', category: 'bambini', week_start: '2026-09-28', done: false, done_at: null, created_by: HIM, created_at: '2026-09-27T10:00:00Z' },

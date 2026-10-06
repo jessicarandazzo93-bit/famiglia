@@ -38,7 +38,7 @@ const catLabel = (c) => (CATS.find((x) => x[0] === c) || [c, c])[1];
 const MOODS = ['😣', '😕', '😐', '🙂', '😄'];
 const MOOD_TXT = ['Male', 'Così così', 'Normale', 'Bene', 'Benissimo'];
 const TAGS = ['Nausea', 'Stanchezza', 'Poca fame', 'Tanta fame', 'Mal di testa', 'Stitichezza', 'Gonfiore', 'Reflusso', 'Nervosa', 'Piena di energia', 'Dormito male'];
-const RIFIUTI = [['umido', '🍂', 'Umido'], ['plastica', '🧴', 'Plastica e metalli'], ['carta', '📦', 'Carta e cartone'], ['vetro', '🍾', 'Vetro'], ['indiff', '🗑️', 'Indifferenziato']];
+const RIFIUTI = [['umido', '🍂', 'Organico'], ['plastica', '🧴', 'Plastica e metalli'], ['carta', '📦', 'Carta e cartone'], ['vetro', '🍾', 'Vetro'], ['indiff', '🗑️', 'Indifferenziata'], ['pannolini', '👶', 'Pannolini']];
 const rifName = (k) => { const r = RIFIUTI.find((x) => x[0] === k); return r ? `${r[1]} ${r[2]}` : k; };
 const CYCLE_DAYS = 28;
 
@@ -96,8 +96,31 @@ function shopWeek() {
 const nameOf = (id) => (id === S.user?.id ? 'te' : S.profiles[id] || 'qualcuno');
 
 // Differenziata: { days: { '0': ['umido'], ... }, when: 'sera' | 'mattina', time: '20:30' }
-const rif = () => ({ days: {}, when: 'sera', time: '', ...(S.settings.rifiuti || {}) });
-const rifOn = (date) => rif().days[wdIdx(date)] || [];
+// alt: { '2': '2026-10-07' } = quel giorno si raccoglie a settimane alterne, a partire da quella data
+const rif = () => ({ days: {}, alt: {}, when: 'sera', time: '', ...(S.settings.rifiuti || {}) });
+const isAltWeek = (date, anchor) => ((daysBetween(parseYmd(anchor), date) % 14) + 14) % 14 === 0;
+// raccolta prevista da calendario, prima di togliere i festivi
+const rifPlanned = (date) => {
+  const r = rif(), i = wdIdx(date);
+  const types = r.days[i] || [];
+  return types.length && r.alt?.[i] && !isAltWeek(date, r.alt[i]) ? [] : types;
+};
+const rifOn = (date) => (isHoliday(date) ? [] : rifPlanned(date));
+
+// Festività nazionali (nei festivi niente raccolta)
+function easter(y) {
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const n = h + l - 7 * m + 114;
+  return new Date(y, Math.floor(n / 31) - 1, (n % 31) + 1);
+}
+const holidayCache = {};
+function isHoliday(date) {
+  const y = date.getFullYear();
+  holidayCache[y] ||= new Set([...['01-01', '01-06', '04-25', '05-01', '06-02', '08-15', '11-01', '12-08', '12-25', '12-26'].map((md) => `${y}-${md}`), ymd(addDays(easter(y), 1))]);
+  return holidayCache[y].has(ymd(date));
+}
 const rifTime = () => rif().time || (rif().when === 'sera' ? '20:30' : '07:00');
 
 // Ciclo: previsione a 28 giorni dall'ultimo inizio
@@ -311,9 +334,12 @@ function viewOggi() {
 
   // Differenziata
   const r = rif();
-  const rTypes = r.when === 'sera' ? rifOn(addDays(now, 1)) : rifOn(now);
+  const rDay = r.when === 'sera' ? addDays(now, 1) : now;
+  const rTypes = rifOn(rDay);
   if (rTypes.length) {
     out += `<div class="card info" data-act="tab" data-v="calendario" style="cursor:pointer"><b>♻️ ${r.when === 'sera' ? 'Stasera porta fuori' : 'Stamattina porta fuori'}:</b> ${rTypes.map(rifName).join(', ')}</div>`;
+  } else if (isHoliday(rDay) && rifPlanned(rDay).length) {
+    out += `<div class="card info">♻️ ${r.when === 'sera' ? 'Domani' : 'Oggi'} è festivo: <b>niente raccolta</b>, non portare fuori niente.</div>`;
   }
 
   // Impegni di oggi e domani
@@ -725,11 +751,22 @@ function viewCalendario() {
 
 function viewRifiuti() {
   const r = rif();
-  const rows = GIORNI.map((g, i) => `<tr><td><b>${g.slice(0, 3)}</b></td><td><div class="chips" style="margin:0">${RIFIUTI.map(([k, ic, nm]) =>
-    `<label class="chip tag small-chip ${(r.days[i] || []).includes(k) ? 'on' : ''}"><input type="checkbox" id="r-${i}-${k}" name="d${i}" value="${k}" ${(r.days[i] || []).includes(k) ? 'checked' : ''} data-fresh="1">${ic} ${nm.split(' ')[0]}</label>`).join('')}</div></td></tr>`).join('');
+  const rows = GIORNI.map((g, i) => {
+    // prossime due date di quel giorno della settimana, per scegliere le settimane alterne
+    let d1 = dayStart(new Date());
+    while (wdIdx(d1) !== i) d1 = addDays(d1, 1);
+    const opts = [ymd(d1), ymd(addDays(d1, 7))];
+    const cur = r.alt?.[i] ? opts.find((o) => isAltWeek(parseYmd(o), r.alt[i])) : '';
+    return `<tr><td><b>${g.slice(0, 3)}</b></td><td><div class="chips" style="margin:0">${RIFIUTI.map(([k, ic, nm]) =>
+      `<label class="chip tag small-chip ${(r.days[i] || []).includes(k) ? 'on' : ''}"><input type="checkbox" id="r-${i}-${k}" name="d${i}" value="${k}" ${(r.days[i] || []).includes(k) ? 'checked' : ''} data-fresh="1">${ic} ${nm.split(' ')[0]}</label>`).join('')}</div>
+      <select id="r-alt-${i}" name="alt${i}" class="small" style="margin-top:6px;padding:6px 8px" data-fresh="1">
+        <option value="">Ogni settimana</option>
+        ${opts.map((o) => `<option value="${o}" ${cur === o ? 'selected' : ''}>Ogni 15 giorni, prossima ${fmtDay(o)}</option>`).join('')}
+      </select></td></tr>`;
+  }).join('');
   const configured = Object.values(r.days).some((x) => x.length);
   return `<form class="card" data-form="rif-save"><h2>♻️ Differenziata</h2>
-      <p class="small muted" style="margin:0 0 8px">Segna cosa raccolgono in ogni giorno (vale per tutta la famiglia).</p>
+      <p class="small muted" style="margin:0 0 8px">Segna cosa raccolgono in ogni giorno (vale per tutta la famiglia). Nei festivi nazionali la raccolta è saltata in automatico.</p>
       <table>${rows}</table>
       <div class="row" style="margin-top:10px">
         <select id="r-when" name="when" data-fresh="1"><option value="sera" ${r.when === 'sera' ? 'selected' : ''}>La porto fuori la sera prima</option>
@@ -771,16 +808,25 @@ function icsRifiuti() {
   const [hh, mm] = rifTime().split(':');
   const BY = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
   const out = [];
+  const back = r.when === 'sera' ? 1 : 0; // il promemoria è la sera prima della raccolta
+  const today = dayStart(new Date());
   for (let i = 0; i < 7; i++) {
     const types = r.days[i] || [];
     if (!types.length) continue;
-    const remindIdx = r.when === 'sera' ? (i + 6) % 7 : i;
-    let d = dayStart(new Date());
-    while (wdIdx(d) !== remindIdx) d = addDays(d, 1);
+    const step = r.alt?.[i] ? 14 : 7;
+    // prima raccolta il cui promemoria non è già passato
+    let c = addDays(today, back);
+    while (wdIdx(c) !== i || (step === 14 && !isAltWeek(c, r.alt[i]))) c = addDays(c, 1);
+    const first = addDays(c, -back);
+    // salta i promemoria dei festivi per i prossimi 2 anni
+    const ex = [];
+    for (let x = c; daysBetween(today, x) < 730; x = addDays(x, step)) {
+      if (isHoliday(x)) ex.push(`EXDATE:${icsDay(ymd(addDays(x, -back)))}T${hh}${mm}00`);
+    }
     const names = types.map((k) => (RIFIUTI.find((x) => x[0] === k) || [k, '', k])[2]).join(', ');
     const title = `♻️ ${r.when === 'sera' ? 'Stasera fuori' : 'Fuori stamattina'}: ${names}`;
     out.push(['BEGIN:VEVENT', `UID:rifiuti-${i}@famiglia`, `DTSTAMP:${icsStamp()}`, `SUMMARY:${icsEsc(title)}`,
-      `DTSTART:${icsDay(ymd(d))}T${hh}${mm}00`, 'DURATION:PT15M', `RRULE:FREQ=WEEKLY;BYDAY=${BY[remindIdx]}`,
+      `DTSTART:${icsDay(ymd(first))}T${hh}${mm}00`, 'DURATION:PT15M', `RRULE:FREQ=WEEKLY;INTERVAL=${step / 7};BYDAY=${BY[wdIdx(first)]}`, ...ex,
       'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(title)}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT'].join('\r\n'));
   }
   return icsWrap(out);
@@ -1038,9 +1084,13 @@ app.addEventListener('submit', async (e) => {
         break;
       }
       case 'rif-save': {
-        const days = {};
-        for (let i = 0; i < 7; i++) { const t = formData.getAll(`d${i}`); if (t.length) days[i] = t; }
-        check(await sb.from('app_settings').upsert({ key: 'rifiuti', value: { days, when: fd.when, time: fd.time || '' } }));
+        const days = {}, alt = {};
+        for (let i = 0; i < 7; i++) {
+          const t = formData.getAll(`d${i}`);
+          if (t.length) days[i] = t;
+          if (t.length && fd[`alt${i}`]) alt[i] = fd[`alt${i}`];
+        }
+        check(await sb.from('app_settings').upsert({ key: 'rifiuti', value: { days, alt, when: fd.when, time: fd.time || '' } }));
         await reload('settings');
         toast('Differenziata salvata');
         break;
