@@ -2,7 +2,7 @@
 const ME = 'u-me', HIM = 'u-him';
 const db = {
   profiles: [{ id: ME, name: 'Mamma' }, { id: HIM, name: 'Papà' }],
-  app_settings: [],
+  app_settings: [{ key: 'rifiuti', value: { days: { 1: ['umido'], 3: ['plastica', 'carta'], 5: ['umido', 'vetro'] }, when: 'sera', time: '20:30' } }],
   user_settings: [{ user_id: ME, follows_diet: true, height_cm: 159, goal_kg: 90 }],
   shopping_items: [
     { id: 1, name: 'Pannolini', category: 'bambini', week_start: '2026-09-28', done: false, done_at: null, created_by: HIM, created_at: '2026-09-27T10:00:00Z' },
@@ -14,10 +14,13 @@ const db = {
   ],
   weights: [{ id: 1, day: '2026-09-21', kg: 115.2 }, { id: 2, day: '2026-09-28', kg: 114.6 }, { id: 3, day: '2026-10-05', kg: 114 }],
   blood_pressure: [{ id: 1, measured_at: new Date().toISOString(), sys: 142, dia: 92, pulse: 80, note: null }],
-  wegovy_log: [],
+  wegovy_log: [{ id: 1, day: '2026-10-05', dose: '0,25 mg', notes: null }],
+  events: [{ id: 1, title: 'Pediatra', day: '2026-10-07', time: '15:30:00', who: 'Bimbi', note: null }],
+  diary: [{ id: 1, day: '2026-10-05', mood: 2, tags: ['Nausea'], notes: 'Un po stanca' }],
+  cycle_log: [{ id: 1, start_day: '2026-09-12' }, { id: 2, start_day: '2026-08-15' }],
 };
 let seq = 100;
-const PK = { profiles: 'id', app_settings: 'key', user_settings: 'user_id', diet_weeks_loaded: 'week_start' };
+const PK = { profiles: 'id', app_settings: 'key', user_settings: 'user_id', diet_weeks_loaded: 'week_start', diary: 'day', cycle_log: 'start_day' };
 
 function q(table) {
   let rows = () => db[table];
@@ -31,6 +34,7 @@ function q(table) {
       return api;
     },
     eq(k, v) { filters.push((r) => r[k] === v); return api; },
+    gte(k, v) { filters.push((r) => r[k] >= v); return api; },
     in(k, vs) { filters.push((r) => vs.includes(r[k])); return api; },
     order(k, o = {}) { orders.push([k, o.ascending !== false]); return api; },
     limit(n) { lim = n; return api; },

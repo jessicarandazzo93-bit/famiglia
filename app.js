@@ -25,13 +25,22 @@ const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); r
 const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const mondayOf = (d) => addDays(dayStart(d), -((d.getDay() + 6) % 7));
 const daysBetween = (a, b) => Math.round((dayStart(b) - dayStart(a)) / 86400000);
+const wdIdx = (d) => (d.getDay() + 6) % 7; // 0 = lunedì
 const fmtDay = (s) => parseYmd(s).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
+const fmtLong = (s) => parseYmd(s).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
 const fmtDT = (s) => new Date(s).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const hm = (t) => (t ? t.slice(0, 5) : '');
 const num = (v) => { const n = parseFloat(String(v).replace(',', '.')); return Number.isFinite(n) ? n : null; };
 const kgFmt = (n) => Number(n).toLocaleString('it-IT', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const GIORNI = ['Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato', 'Domenica'];
 const CATS = [['dieta', '🥗 Dieta'], ['casa', '🏠 Casa'], ['bambini', '🧸 Bambini'], ['altro', '📦 Altro']];
 const catLabel = (c) => (CATS.find((x) => x[0] === c) || [c, c])[1];
+const MOODS = ['😣', '😕', '😐', '🙂', '😄'];
+const MOOD_TXT = ['Male', 'Così così', 'Normale', 'Bene', 'Benissimo'];
+const TAGS = ['Nausea', 'Stanchezza', 'Poca fame', 'Tanta fame', 'Mal di testa', 'Stitichezza', 'Gonfiore', 'Reflusso', 'Nervosa', 'Piena di energia', 'Dormito male'];
+const RIFIUTI = [['umido', '🍂', 'Umido'], ['plastica', '🧴', 'Plastica e metalli'], ['carta', '📦', 'Carta e cartone'], ['vetro', '🍾', 'Vetro'], ['indiff', '🗑️', 'Indifferenziato']];
+const rifName = (k) => { const r = RIFIUTI.find((x) => x[0] === k); return r ? `${r[1]} ${r[2]}` : k; };
+const CYCLE_DAYS = 28;
 
 const store = {
   get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
@@ -43,13 +52,15 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => { t.hidden = true; }, 2600);
+  toast.t = setTimeout(() => { t.hidden = true; }, 2800);
 }
 function fail(e) {
   console.error(e);
   toast(navigator.onLine ? 'Qualcosa è andato storto, riprova' : 'Sei offline: riprova quando torna la rete');
 }
 const check = ({ data, error }) => { if (error) throw error; return data; };
+// tabelle aggiunte dopo: se lo script del database non è ancora stato lanciato, restano vuote
+const optional = (res) => (res.error && /PGRST205|42P01/.test(res.error.code) ? [] : check(res));
 
 // ---------- stato ----------
 const S = {
@@ -57,11 +68,14 @@ const S = {
   profiles: {},
   settings: {},
   mine: { follows_diet: true, height_cm: null, goal_kg: null },
-  shopping: [], tasks: [], weights: [], bp: [], wegovy: [],
-  tab: store.get('tab', 'oggi'),
+  shopping: [], tasks: [], weights: [], bp: [], wegovy: [], events: [], diary: [], cycle: [],
+  tab: store.get('tab', 'oggi') === 'fuori' ? 'fare' : store.get('tab', 'oggi'),
   htab: store.get('htab', 'dieta'),
+  ttab: store.get('tab', '') === 'fuori' ? 'fuori' : store.get('ttab', 'casa'),
   shopFilter: 'tutto',
   dietWeek: null,
+  calMonth: null,
+  calDay: null,
   channel: null,
 };
 
@@ -71,15 +85,35 @@ function dietPos(date) {
   const diff = daysBetween(start, date);
   if (diff < 0) return null;
   const w = Math.floor(diff / 7);
-  return { weekNum: w + 1, idx: w % 4, day: (date.getDay() + 6) % 7 };
+  return { weekNum: w + 1, idx: w % 4, day: wdIdx(date) };
 }
+const dietDay = (date) => { const p = dietPos(date); return p ? { ...DIET.settimane[p.idx].giorni[p.day], pos: p } : null; };
 // Da venerdì la spesa è per la settimana successiva
 function shopWeek() {
   const t = new Date();
-  const wd = (t.getDay() + 6) % 7;
-  return wd >= 4 ? addDays(mondayOf(t), 7) : mondayOf(t);
+  return wdIdx(t) >= 4 ? addDays(mondayOf(t), 7) : mondayOf(t);
 }
 const nameOf = (id) => (id === S.user?.id ? 'te' : S.profiles[id] || 'qualcuno');
+
+// Differenziata: { days: { '0': ['umido'], ... }, when: 'sera' | 'mattina', time: '20:30' }
+const rif = () => ({ days: {}, when: 'sera', time: '', ...(S.settings.rifiuti || {}) });
+const rifOn = (date) => rif().days[wdIdx(date)] || [];
+const rifTime = () => rif().time || (rif().when === 'sera' ? '20:30' : '07:00');
+
+// Ciclo: previsione a 28 giorni dall'ultimo inizio
+function cycleInfo() {
+  if (!S.cycle.length) return null;
+  const last = S.cycle[0].start_day;
+  const next = addDays(parseYmd(last), CYCLE_DAYS);
+  const lens = S.cycle.slice(0, 7).map((c, i, a) => (a[i + 1] ? daysBetween(parseYmd(a[i + 1].start_day), parseYmd(c.start_day)) : null)).filter((n) => n && n < 60);
+  return {
+    last,
+    next: ymd(next),
+    dayOf: daysBetween(parseYmd(last), new Date()) + 1,
+    toNext: daysBetween(new Date(), next),
+    avg: lens.length ? Math.round(lens.reduce((s, n) => s + n, 0) / lens.length) : null,
+  };
+}
 
 // ---------- dati ----------
 const since = () => new Date(Date.now() - 7 * 86400000).toISOString();
@@ -111,6 +145,15 @@ const loaders = {
   async wegovy() {
     S.wegovy = check(await sb.from('wegovy_log').select('*').order('day', { ascending: false }).limit(60));
   },
+  async events() {
+    S.events = optional(await sb.from('events').select('*').gte('day', ymd(addDays(new Date(), -90))).order('day').order('time', { nullsFirst: true }));
+  },
+  async diary() {
+    S.diary = optional(await sb.from('diary').select('*').order('day', { ascending: false }).limit(120));
+  },
+  async cycle() {
+    S.cycle = optional(await sb.from('cycle_log').select('*').order('start_day', { ascending: false }).limit(24));
+  },
 };
 const reload = async (...names) => { await Promise.all(names.map((n) => loaders[n]())); render(); };
 
@@ -129,11 +172,12 @@ async function ensureDietShopping() {
 
 function subscribe() {
   if (S.channel) return;
-  let t;
-  const later = (name) => () => { clearTimeout(t); t = setTimeout(() => reload(name).catch(fail), 300); };
+  const timers = {};
+  const later = (name) => () => { clearTimeout(timers[name]); timers[name] = setTimeout(() => reload(name).catch(fail), 300); };
   S.channel = sb.channel('famiglia')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'shopping_items' }, later('shopping'))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, later('tasks'))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, later('events'))
     .subscribe();
 }
 
@@ -170,7 +214,7 @@ async function start(user) {
 // Quando si torna sull'app (es. dal telefono) aggiorno i dati condivisi
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.user && S.profiles[S.user.id]) {
-    ensureDietShopping().then(() => reload('shopping', 'tasks')).catch(() => {});
+    ensureDietShopping().then(() => reload('shopping', 'tasks', 'events')).catch(() => {});
   }
 });
 
@@ -187,13 +231,14 @@ function renderLogin() {
     <p class="muted" style="text-align:center">Entra con la tua email e password</p>
     <form class="card" data-form="login">
       <label class="f" for="l-email">Email</label>
-      <input id="l-email" name="email" type="email" autocomplete="username" required>
+      <input id="l-email" name="email" type="email" autocomplete="username" autocapitalize="none" required>
       <label class="f" for="l-pass">Password</label>
       <input id="l-pass" name="password" type="password" autocomplete="current-password" required>
       <label class="f" style="display:flex;gap:8px;align-items:center;margin-top:12px;color:var(--ink);font-size:15px">
         <input id="l-remember" name="remember" type="checkbox" style="width:auto" ${remember() ? 'checked' : ''}> Resta connesso
       </label>
       <p style="margin:14px 0 0"><button class="btn full">Entra</button></p>
+      <p id="l-err" class="small" style="color:var(--red);margin:10px 0 0" hidden></p>
     </form></div>`;
 }
 
@@ -217,11 +262,11 @@ function render() {
   // conserva quello che si stava scrivendo quando arriva un aggiornamento in tempo reale
   const kept = {};
   app.querySelectorAll('input[id],select[id],textarea[id]').forEach((el) => {
-    kept[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+    kept[el.id] = el.type === 'checkbox' || el.type === 'radio' ? el.checked : el.value;
   });
   const focus = document.activeElement?.id;
 
-  const views = { oggi: viewOggi, salute: viewSalute, spesa: viewSpesa, fuori: viewFuori };
+  const views = { oggi: viewOggi, salute: viewSalute, spesa: viewSpesa, fare: viewFare, calendario: viewCalendario };
   const view = (views[S.tab] || viewOggi)();
   app.innerHTML = `<div class="wrap">
       <div class="top"><span class="who">Ciao ${esc(S.profiles[S.user.id])}</span>
@@ -232,71 +277,110 @@ function render() {
   for (const [id, v] of Object.entries(kept)) {
     const el = document.getElementById(id);
     if (!el || el.dataset.fresh) continue;
-    if (el.type === 'checkbox') el.checked = v; else el.value = v;
+    if (el.type === 'checkbox' || el.type === 'radio') el.checked = v; else el.value = v;
   }
   if (focus) document.getElementById(focus)?.focus();
 }
 
 function nav() {
+  const today = ymd(new Date());
   const toBuy = S.shopping.filter((i) => !i.done).length;
-  const late = S.tasks.filter((t) => !t.done && t.due && t.due <= ymd(new Date())).length;
+  const late = S.tasks.filter((t) => !t.done && t.due && t.due <= today).length;
+  const evToday = S.events.filter((e) => e.day === today).length;
   const b = (id, ic, lbl, dot) => `<button class="${S.tab === id ? 'on' : ''}" data-act="tab" data-v="${id}">
       <span class="ic">${ic}</span>${lbl}${dot ? `<span class="dot">${dot}</span>` : ''}</button>`;
   return `<nav class="tabs"><div class="in">
-    ${b('oggi', '🏡', 'Oggi')}${b('salute', '💚', 'Salute')}${b('spesa', '🛒', 'Spesa', toBuy)}${b('fuori', '📋', 'Fuori casa', late)}
+    ${b('oggi', '🏡', 'Oggi')}${b('salute', '💚', 'Salute')}${b('spesa', '🛒', 'Spesa', toBuy)}${b('fare', '📋', 'Da fare', late)}${b('calendario', '📅', 'Calendario', evToday)}
   </div></nav>`;
 }
 
 // ---------- OGGI ----------
+function mealBlock(g) {
+  return `<div class="meal">
+    <div class="lbl">Pranzo</div><div>${esc(g.pranzo)}</div>
+    <div class="lbl">Cena</div><div class="${g.libero ? 'free' : ''}">${esc(g.cena)}${g.doppio ? ' <span class="badge orange">cucina doppio</span>' : ''}</div>
+  </div>`;
+}
+
 function viewOggi() {
   const now = new Date();
+  const today = ymd(now);
   const h = now.getHours();
   const saluto = h < 12 ? 'Buongiorno' : h < 18 ? 'Buon pomeriggio' : 'Buonasera';
-  const dataLunga = now.toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
-  let out = `<h1>${saluto} ☀️</h1><div class="muted" style="text-transform:capitalize">${dataLunga}</div>`;
+  let out = `<h1>${saluto} ☀️</h1><div class="muted" style="text-transform:capitalize">${fmtLong(today)}</div>`;
 
+  // Differenziata
+  const r = rif();
+  const rTypes = r.when === 'sera' ? rifOn(addDays(now, 1)) : rifOn(now);
+  if (rTypes.length) {
+    out += `<div class="card info" data-act="tab" data-v="calendario" style="cursor:pointer"><b>♻️ ${r.when === 'sera' ? 'Stasera porta fuori' : 'Stamattina porta fuori'}:</b> ${rTypes.map(rifName).join(', ')}</div>`;
+  }
+
+  // Impegni di oggi e domani
+  const tomorrow = ymd(addDays(now, 1));
+  const evs = S.events.filter((e) => e.day === today || e.day === tomorrow);
+  if (evs.length) {
+    out += `<div class="card" data-act="tab" data-v="calendario" style="cursor:pointer"><h2>📅 Impegni</h2><ul class="list">${evs.map((e) =>
+      `<li class="item"><div class="main"><div class="title">${e.time ? `<b>${hm(e.time)}</b> ` : ''}${esc(e.title)}</div>
+        <div class="meta">${e.day === today ? '<span class="badge orange">oggi</span>' : '<span class="badge blue">domani</span>'}${e.who ? ' · ' + esc(e.who) : ''}</div></div></li>`).join('')}</ul></div>`;
+  }
+
+  // Dieta
   if (S.mine.follows_diet) {
-    const pos = dietPos(now);
-    if (!pos) {
+    const g = dietDay(now);
+    if (!g) {
       out += `<div class="card info">🥗 La dieta parte <b>${fmtDay(ymd(mondayOf(parseYmd(dietStart()))))}</b>.</div>`;
     } else {
-      const g = DIET.settimane[pos.idx].giorni[pos.day];
-      out += `<div class="card"><h2>🍽️ Oggi si mangia <span class="badge">Settimana ${pos.idx + 1}${pos.weekNum > 4 ? ` · giro ${Math.ceil(pos.weekNum / 4)}` : ''}</span></h2>
-        <div class="meal">
-          <div class="lbl">Colazione</div><div><details><summary style="padding:0;font-weight:400">Una a scelta</summary>
-            <ul style="margin:4px 0 0 18px;padding:0">${DIET.colazioni.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></details></div>
-          <div class="lbl">Pranzo</div><div>${esc(g.pranzo)}</div>
-          <div class="lbl">Cena</div><div class="${g.libero ? 'free' : ''}">${esc(g.cena)}${g.doppio ? ' <span class="badge orange">cucina doppio</span>' : ''}</div>
-        </div>
+      out += `<div class="card"><h2>🍽️ Oggi si mangia <span class="badge">Settimana ${g.pos.idx + 1}${g.pos.weekNum > 4 ? ` · giro ${Math.ceil(g.pos.weekNum / 4)}` : ''}</span></h2>
+        <details class="meal-c"><summary>☕ Colazione: una a scelta</summary>
+          <ul style="margin:4px 0 6px 18px;padding:0">${DIET.colazioni.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></details>
+        ${mealBlock(g)}
         <p class="small muted" style="margin:10px 0 0">💊 Libramed prima dei pasti con 2 bicchieri d'acqua · 💧 1,5–2 litri al giorno</p>
       </div>`;
 
-      const tom = addDays(now, 1);
-      const tp = dietPos(tom);
-      if (tp && tp.day <= 4) {
-        const gt = DIET.settimane[tp.idx].giorni[tp.day];
+      const gt = dietDay(addDays(now, 1));
+      if (gt && gt.pos.day <= 4) {
         out += `<div class="card tip"><b>🌙 Stasera prepara il pranzo di domani</b><br>${esc(gt.pranzo)}
           ${g.doppio ? '<div class="small" style="margin-top:4px">Usa la seconda porzione della cena di stasera.</div>' : ''}</div>`;
       }
-      if (pos.day === 6) {
+      if (g.pos.day === 6) {
         out += `<div class="card warn"><b>🕐 Domenica: 30 minuti di preparazione</b>
           <ul style="margin:6px 0 0 18px;padding:0">${DIET.prepDomenica.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>`;
       }
+      const next = [1, 2, 3].map((n) => addDays(now, n)).map((d) => [d, dietDay(d)]).filter(([, x]) => x);
+      out += `<div class="card"><details open><summary>🗓️ Prossimi giorni</summary>${next.map(([d, x]) =>
+        `<div style="margin-top:10px"><b style="text-transform:capitalize">${fmtLong(ymd(d))}</b>${mealBlock(x)}</div>`).join('')}
+        <p style="margin:10px 0 0"><button class="btn ghost" data-act="go-dieta">Vedi tutta la settimana</button></p></details></div>`;
     }
   }
 
+  // Come ti senti
+  const d = S.diary.find((x) => x.day === today);
+  out += `<div class="card"><h2>💭 Come ti senti oggi?</h2><div class="moods">${MOODS.map((m, i) =>
+    `<button class="mood ${d?.mood === i + 1 ? 'on' : ''}" data-act="mood" data-v="${i + 1}" aria-label="${MOOD_TXT[i]}">${m}</button>`).join('')}</div>
+    ${d && (d.tags?.length || d.notes) ? `<div class="small muted" style="margin-top:6px">${esc([...(d.tags || []), d.notes].filter(Boolean).join(' · '))}</div>` : ''}
+    <p style="margin:8px 0 0"><button class="linkbtn" data-act="go-diario">Scrivi come ti senti →</button></p></div>`;
+
+  // Ciclo
+  const c = cycleInfo();
+  if (c && c.toNext <= 3 && c.toNext >= -10) {
+    out += `<div class="card warn" data-act="go-ciclo" style="cursor:pointer">🩸 ${c.toNext > 0 ? `Ciclo previsto tra <b>${c.toNext} giorn${c.toNext === 1 ? 'o' : 'i'}</b>` : c.toNext === 0 ? 'Ciclo previsto <b>oggi</b>' : `Ciclo in ritardo di <b>${-c.toNext} giorn${c.toNext === -1 ? 'o' : 'i'}</b>`} · tocca per segnarlo</div>`;
+  }
+
+  // Spesa
   const toBuy = S.shopping.filter((i) => !i.done);
   const left = toBuy.filter((i) => i.week_start < ymd(shopWeek())).length;
   out += `<div class="card" data-act="tab" data-v="spesa" style="cursor:pointer"><h2>🛒 Spesa</h2>
     ${toBuy.length ? `<b>${toBuy.length}</b> cose da prendere${left ? ` · <span class="badge orange">${left} rimaste dalla volta scorsa</span>` : ''}` : 'Lista vuota 🎉'}
     <div class="small muted" style="margin-top:4px">Tocca per aprire la lista →</div></div>`;
 
-  const today = ymd(new Date());
-  const soon = ymd(addDays(new Date(), 3));
+  // Da fare
+  const soon = ymd(addDays(now, 3));
   const urgent = S.tasks.filter((t) => !t.done && (!t.due || t.due <= soon))
-    .sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).slice(0, 5);
-  out += `<div class="card"><h2>📋 Da fare</h2>${urgent.length ? `<ul class="list">${urgent.map((t) => taskRow(t, today)).join('')}</ul>` : '<span class="muted">Niente in scadenza nei prossimi giorni.</span>'}</div>`;
+    .sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).slice(0, 6);
+  out += `<div class="card"><h2>📋 Da fare</h2>${urgent.length ? `<ul class="list">${urgent.map((t) => taskRow(t, today, true)).join('')}</ul>` : '<span class="muted">Niente in scadenza nei prossimi giorni.</span>'}</div>`;
 
+  // Peso
   const last = S.weights[S.weights.length - 1];
   out += `<form class="card" data-form="weight-add"><h2>⚖️ Peso</h2>
     ${last ? `<div class="small muted">Ultima pesata: <b>${kgFmt(last.kg)} kg</b> (${fmtDay(last.day)})</div>` : ''}
@@ -307,10 +391,10 @@ function viewOggi() {
 
 // ---------- SALUTE ----------
 function viewSalute() {
-  const tabs = [['dieta', 'Dieta'], ['peso', 'Peso'], ['pressione', 'Pressione'], ['wegovy', 'Wegovy']];
-  const seg = `<div class="seg">${tabs.map(([k, l]) => `<button class="${S.htab === k ? 'on' : ''}" data-act="htab" data-v="${k}">${l}</button>`).join('')}</div>`;
-  const sub = { dieta: viewDieta, peso: viewPeso, pressione: viewPressione, wegovy: viewWegovy }[S.htab] || viewDieta;
-  return `<h1>💚 Salute</h1><div class="small muted">I dati di peso, pressione e Wegovy li vedi solo tu.</div>${seg}${sub()}`;
+  const tabs = [['dieta', 'Dieta'], ['diario', 'Diario'], ['peso', 'Peso'], ['ciclo', 'Ciclo'], ['pressione', 'Pressione'], ['wegovy', 'Wegovy']];
+  const seg = `<div class="seg scroll">${tabs.map(([k, l]) => `<button class="${S.htab === k ? 'on' : ''}" data-act="htab" data-v="${k}">${l}</button>`).join('')}</div>`;
+  const sub = { dieta: viewDieta, diario: viewDiario, peso: viewPeso, ciclo: viewCiclo, pressione: viewPressione, wegovy: viewWegovy }[S.htab] || viewDieta;
+  return `<h1>💚 Salute</h1><div class="small muted">Diario, peso, ciclo, pressione e Wegovy li vedi solo tu.</div>${seg}${sub()}`;
 }
 
 function viewDieta() {
@@ -318,15 +402,15 @@ function viewDieta() {
   const w = S.dietWeek ?? (pos ? pos.idx : 0);
   const sett = DIET.settimane[w];
   const chips = DIET.settimane.map((_, i) => `<button class="chip ${i === w ? 'on' : ''}" data-act="dweek" data-v="${i}">Settimana ${i + 1}</button>`).join('');
-  const rows = sett.giorni.map((g, i) => {
+  const days = sett.giorni.map((g, i) => {
     const isToday = pos && pos.idx === w && pos.day === i;
-    return `<tr style="${isToday ? 'background:var(--green-soft)' : ''}"><td><b>${GIORNI[i].slice(0, 3)}</b>${isToday ? '<br><span class="badge">oggi</span>' : ''}</td>
-      <td>${esc(g.pranzo)}</td><td class="${g.libero ? 'free' : ''}">${esc(g.cena)}${g.doppio ? ' <span class="badge orange">x2</span>' : ''}</td></tr>`;
+    const past = pos && pos.idx === w && i < pos.day;
+    return `<div class="card day ${isToday ? 'today' : ''} ${past ? 'past' : ''}">
+      <h2>${GIORNI[i]} ${isToday ? '<span class="badge">oggi</span>' : ''}</h2>${mealBlock(g)}</div>`;
   }).join('');
   return `<div class="chips">${chips}</div>
     ${sett.nota ? `<div class="card info small">${esc(sett.nota)}</div>` : ''}
-    <div class="card" style="padding:8px 10px"><table><tr><th></th><th>Pranzo (al lavoro)</th><th>Cena</th></tr>${rows}</table>
-      <p class="small muted">x2 = cucina doppio: la seconda porzione è il pranzo di domani.</p></div>
+    ${days}
     <div class="card">
       <details open><summary>🔑 Le regole</summary><ul>${DIET.regole.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></details>
       <details><summary>📏 Porzioni</summary><table>${DIET.porzioni.map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b)}</td></tr>`).join('')}</table></details>
@@ -341,6 +425,31 @@ function viewDieta() {
       </label>
       <p style="margin:12px 0 0"><button class="btn">Salva</button></p></form>
     <div class="card warn small">⚠️ Questo piano non sostituisce il parere della tua endocrinologa. Se allatti, se hai capogiri o se la pressione scende molto, avvisa il medico.</div>`;
+}
+
+function viewDiario() {
+  const today = ymd(new Date());
+  const d = S.diary.find((x) => x.day === today) || {};
+  const tags = new Set(d.tags || []);
+  const byDay = (arr, k) => Object.fromEntries(arr.map((x) => [x[k], x]));
+  const wg = byDay(S.wegovy, 'day');
+  const wt = byDay(S.weights, 'day');
+  const cy = byDay(S.cycle, 'start_day');
+  return `<form class="card" data-form="diary-save"><h2>💭 Come ti senti oggi?</h2>
+      <div class="moods">${MOODS.map((m, i) => `<label class="mood ${d.mood === i + 1 ? 'on' : ''}"><input type="radio" id="dm-${i + 1}" name="mood" value="${i + 1}" ${d.mood === i + 1 ? 'checked' : ''} data-fresh="1">${m}</label>`).join('')}</div>
+      <div class="chips" style="margin-top:10px">${TAGS.map((t, i) => `<label class="chip tag ${tags.has(t) ? 'on' : ''}"><input type="checkbox" id="dt-${i}" name="tag" value="${esc(t)}" ${tags.has(t) ? 'checked' : ''} data-fresh="1">${esc(t)}</label>`).join('')}</div>
+      <label class="f" for="d-notes">Note</label>
+      <textarea id="d-notes" name="notes" maxlength="1000" placeholder="Com'è andata oggi? Cosa hai mangiato fuori programma, com'era l'umore…" data-fresh="1">${esc(d.notes || '')}</textarea>
+      <input type="hidden" name="day" value="${today}">
+      <p style="margin:12px 0 0"><button class="btn">Salva</button></p></form>
+    ${S.diary.length ? `<div class="card"><h2>Diario</h2><ul class="list">${S.diary.slice(0, 60).map((x) => {
+      const extra = [wg[x.day] ? `💉 ${esc(wg[x.day].dose)}` : '', wt[x.day] ? `⚖️ ${kgFmt(wt[x.day].kg)} kg` : '', cy[x.day] ? '🩸 ciclo' : ''].filter(Boolean).join(' · ');
+      return `<li class="item"><div style="font-size:26px">${x.mood ? MOODS[x.mood - 1] : '·'}</div><div class="main">
+        <div class="title"><b style="text-transform:capitalize">${fmtDay(x.day)}</b>${extra ? ` <span class="small muted">${extra}</span>` : ''}</div>
+        <div class="meta">${esc([...(x.tags || []), x.notes].filter(Boolean).join(' · '))}</div></div>
+        <button class="x" data-act="diary-del" data-v="${x.id}" aria-label="Elimina">✕</button></li>`;
+    }).join('')}</ul></div>` : ''}
+    <div class="card info small">Puoi scriverlo ogni giorno, non solo quello della puntura. Nel diario vedi accanto anche puntura, peso e ciclo di quel giorno.</div>`;
 }
 
 function weightChart(ws, goal) {
@@ -392,6 +501,30 @@ function viewPeso() {
       </div><p style="margin:12px 0 0"><button class="btn ghost">Salva</button></p></form>`;
 }
 
+function viewCiclo() {
+  const c = cycleInfo();
+  const list = S.cycle;
+  let head = '<div class="card info">Segna il primo giorno dell\'ultimo ciclo: da lì calcolo il prossimo (ogni 28 giorni).</div>';
+  if (c) {
+    const st = c.toNext > 0 ? `tra <b>${c.toNext} giorn${c.toNext === 1 ? 'o' : 'i'}</b>` : c.toNext === 0 ? '<b>oggi</b>' : `<span style="color:var(--red)">in ritardo di <b>${-c.toNext} giorn${c.toNext === -1 ? 'o' : 'i'}</b></span>`;
+    head = `<div class="card"><div class="stats">
+        <div class="stat"><b>${c.dayOf}°</b><span>giorno del ciclo</span></div>
+        <div class="stat"><b>${parseYmd(c.next).toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })}</b><span>prossimo previsto</span></div>
+        <div class="stat"><b>${c.avg ?? '–'}</b><span>durata media</span></div></div>
+      <p style="margin:10px 0 0">🩸 Prossimo ciclo ${st}</p></div>`;
+  }
+  return `${head}
+    <form class="card" data-form="cycle-add"><h2>🩸 È arrivato il ciclo</h2>
+      <div class="row"><input id="c-start" name="day" type="date" value="${ymd(new Date())}" required><button class="btn">Segna</button></div>
+      <p class="small muted" style="margin:8px 0 0">Segna solo il primo giorno. Se è arrivato ieri, cambia la data.</p></form>
+    ${list.length ? `<div class="card"><h2>Storico</h2><ul class="list">${list.map((x, i) => {
+      const len = list[i + 1] ? daysBetween(parseYmd(list[i + 1].start_day), parseYmd(x.start_day)) : null;
+      return `<li class="item"><div class="main"><div class="title"><b>${fmtDay(x.start_day)}</b></div>
+        <div class="meta">${len ? `ciclo di ${len} giorni` : 'primo segnato'}</div></div>
+        <button class="x" data-act="cycle-del" data-v="${x.id}" aria-label="Elimina">✕</button></li>`;
+    }).join('')}</ul></div>` : ''}`;
+}
+
 function bpBadge(r) {
   if (r.sys >= 140 || r.dia >= 90) return '<span class="badge red">alta</span>';
   if (r.sys < 90 || r.dia < 60) return '<span class="badge blue">bassa</span>';
@@ -429,14 +562,14 @@ function viewWegovy() {
         <input id="g-day" name="day" type="date" value="${ymd(new Date())}" required>
         <select id="g-dose" name="dose">${doses.map((d) => `<option ${last?.dose === d ? 'selected' : ''}>${d}</option>`).join('')}</select>
       </div>
-      <label class="f" for="g-notes">Effetti collaterali / note</label>
-      <textarea id="g-notes" name="notes" placeholder="es. un po' di nausea il giorno dopo, poca fame…"></textarea>
-      <p style="margin:12px 0 0"><button class="btn">Salva</button></p></form>
-    ${S.wegovy.length ? `<div class="card"><h2>Diario</h2><ul class="list">${S.wegovy.map((r) =>
+      <label class="f" for="g-notes">Note sulla puntura</label>
+      <textarea id="g-notes" name="notes" placeholder="es. punto dell'iniezione, dimenticanze…"></textarea>
+      <p style="margin:12px 0 0"><button class="btn">Salva</button></p>
+      <p class="small muted" style="margin:8px 0 0">Come ti senti nei giorni seguenti scrivilo nel <button type="button" class="linkbtn" data-act="go-diario" style="padding:0">Diario</button>, ogni giorno.</p></form>
+    ${S.wegovy.length ? `<div class="card"><h2>Punture</h2><ul class="list">${S.wegovy.map((r) =>
       `<li class="item"><div class="main"><div class="title"><b>${esc(r.dose)}</b> · ${fmtDay(r.day)}</div>
         ${r.notes ? `<div class="meta">${esc(r.notes)}</div>` : ''}</div>
-        <button class="x" data-act="wg-del" data-v="${r.id}" aria-label="Elimina">✕</button></li>`).join('')}</ul></div>` : ''}
-    <div class="card info small">Porta questo diario alle visite: all'endocrinologa serve sapere come hai tollerato ogni dose.</div>`;
+        <button class="x" data-act="wg-del" data-v="${r.id}" aria-label="Elimina">✕</button></li>`).join('')}</ul></div>` : ''}`;
 }
 
 // ---------- SPESA ----------
@@ -489,29 +622,35 @@ function viewSpesa() {
       <p style="margin:10px 0 0"><button class="btn danger" data-act="shop-clear">Svuota i presi</button></p></details></div>` : ''}`;
 }
 
-// ---------- FUORI CASA ----------
-function taskRow(t, today) {
+// ---------- DA FARE (casa / fuori casa) ----------
+function taskRow(t, today, showKind) {
   const late = t.due && t.due < today;
   const isToday = t.due === today;
   return `<li class="item ${t.done ? 'done' : ''}">
     <button class="check" data-act="task-toggle" data-v="${t.id}" aria-label="${t.done ? 'Da rifare' : 'Fatto'}">${t.done ? '✓' : ''}</button>
-    <div class="main" data-act="task-toggle" data-v="${t.id}"><div class="title">${esc(t.title)}</div>
+    <div class="main" data-act="task-toggle" data-v="${t.id}"><div class="title">${showKind ? (t.kind === 'casa' ? '🏠 ' : '🚗 ') : ''}${esc(t.title)}</div>
       <div class="meta">${t.due ? `<span class="badge ${late ? 'red' : isToday ? 'orange' : 'blue'}">${late ? 'scaduto · ' : isToday ? 'oggi · ' : ''}${fmtDay(t.due)}</span> ` : ''}${t.assignee ? `per ${esc(nameOf(t.assignee))}` : 'per entrambi'}</div></div>
     <button class="x" data-act="task-del" data-v="${t.id}" aria-label="Elimina">✕</button></li>`;
 }
 
-function viewFuori() {
+function viewFare() {
   const today = ymd(new Date());
-  const todo = S.tasks.filter((t) => !t.done).sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999'));
-  const done = S.tasks.filter((t) => t.done);
+  const k = S.ttab;
+  const mine = S.tasks.filter((t) => (t.kind || 'fuori') === k);
+  const todo = mine.filter((t) => !t.done).sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999'));
+  const done = mine.filter((t) => t.done);
   const people = Object.entries(S.profiles);
-  return `<h1>📋 Fuori casa</h1><div class="small muted">Commissioni, appuntamenti, scadenze: le vedete entrambi</div>
+  const n = (kind) => S.tasks.filter((t) => !t.done && (t.kind || 'fuori') === kind).length;
+  const ph = k === 'casa' ? 'es. Cambiare le lenzuola, lavatrice bianchi, sistemare armadio…' : 'es. Ritirare le analisi, pediatra, posta…';
+  return `<h1>📋 Da fare</h1><div class="small muted">Le vedete entrambi</div>
+    <div class="seg"><button class="${k === 'casa' ? 'on' : ''}" data-act="ttab" data-v="casa">🏠 A casa (${n('casa')})</button>
+      <button class="${k === 'fuori' ? 'on' : ''}" data-act="ttab" data-v="fuori">🚗 Fuori casa (${n('fuori')})</button></div>
     <form class="card" data-form="task-add">
-      <input id="t-title" name="title" placeholder="es. Ritirare le analisi, pediatra, posta…" maxlength="120" required autocomplete="off">
+      <input id="t-title" name="title" placeholder="${ph}" maxlength="120" required autocomplete="off">
       <div class="row" style="margin-top:8px">
         <input id="t-due" name="due" type="date" aria-label="Entro il">
-        <select id="t-who" name="assignee"><option value="">Per entrambi</option>${people.map(([id, n]) =>
-          `<option value="${id}">${id === S.user.id ? 'Per me' : 'Per ' + esc(n)}</option>`).join('')}</select>
+        <select id="t-who" name="assignee"><option value="">Per entrambi</option>${people.map(([id, nm]) =>
+          `<option value="${id}">${id === S.user.id ? 'Per me' : 'Per ' + esc(nm)}</option>`).join('')}</select>
         <button class="btn">Aggiungi</button>
       </div></form>
     <div class="card">${todo.length ? `<ul class="list">${todo.map((t) => taskRow(t, today)).join('')}</ul>` : '<span class="muted">Tutto fatto 🎉</span>'}</div>
@@ -519,7 +658,180 @@ function viewFuori() {
       <ul class="list">${done.map((t) => taskRow(t, today)).join('')}</ul></details></div>` : ''}`;
 }
 
+// ---------- CALENDARIO ----------
+function eventRow(e) {
+  return `<li class="item"><div class="main"><div class="title">${e.time ? `<b>${hm(e.time)}</b> ` : ''}${esc(e.title)}</div>
+    <div class="meta">${fmtDay(e.day)}${e.who ? ' · ' + esc(e.who) : ''}${e.note ? ' · ' + esc(e.note) : ''}</div></div>
+    <button class="x" data-act="ev-ics" data-v="${e.id}" aria-label="Aggiungi al calendario del telefono" title="Promemoria sul telefono">📲</button>
+    <button class="x" data-act="ev-del" data-v="${e.id}" aria-label="Elimina">✕</button></li>`;
+}
+
+function viewCalendario() {
+  const today = ymd(new Date());
+  const sel = S.calDay || today;
+  const m = S.calMonth || new Date(parseYmd(sel).getFullYear(), parseYmd(sel).getMonth(), 1);
+  const first = new Date(m.getFullYear(), m.getMonth(), 1);
+  const gridStart = mondayOf(first);
+  const evByDay = {};
+  S.events.forEach((e) => { (evByDay[e.day] ||= []).push(e); });
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(gridStart, i);
+    const k = ymd(d);
+    if (i >= 35 && d.getMonth() !== m.getMonth()) break;
+    const ev = evByDay[k] || [];
+    cells.push(`<button class="cal-d ${d.getMonth() !== m.getMonth() ? 'out' : ''} ${k === today ? 'today' : ''} ${k === sel ? 'sel' : ''}" data-act="cal-day" data-v="${k}">
+      <span>${d.getDate()}</span><span class="marks">${ev.length ? '<i class="ev"></i>' : ''}${rifOn(d).length ? '<i class="rf"></i>' : ''}</span></button>`);
+  }
+  const monthName = m.toLocaleDateString('it-IT', { month: 'long', year: 'numeric' });
+  const selEv = evByDay[sel] || [];
+  const selRif = rifOn(parseYmd(sel));
+  const upcoming = S.events.filter((e) => e.day >= today && e.day <= ymd(addDays(new Date(), 30)));
+  const who = ['', ...Object.values(S.profiles), 'Bimbi', 'Tutti'];
+
+  return `<h1>📅 Calendario</h1><div class="small muted">Impegni in comune · ♻️ differenziata</div>
+    <div class="card cal">
+      <div class="cal-h"><button class="x" data-act="cal-month" data-v="-1" aria-label="Mese precedente">‹</button>
+        <b style="text-transform:capitalize">${monthName}</b>
+        <button class="x" data-act="cal-month" data-v="1" aria-label="Mese successivo">›</button></div>
+      <div class="cal-g">${['L', 'M', 'M', 'G', 'V', 'S', 'D'].map((x) => `<div class="cal-w">${x}</div>`).join('')}${cells.join('')}</div>
+      <div class="small muted" style="margin-top:6px"><i class="ev"></i> impegno &nbsp; <i class="rf"></i> raccolta rifiuti</div>
+    </div>
+
+    <div class="card"><h2 style="text-transform:capitalize">${fmtLong(sel)}</h2>
+      ${selRif.length ? `<p style="margin:0 0 8px">♻️ Raccolta: ${selRif.map(rifName).join(', ')}</p>` : ''}
+      ${selEv.length ? `<ul class="list">${selEv.map(eventRow).join('')}</ul>` : '<p class="muted" style="margin:0">Nessun impegno.</p>'}
+      <form data-form="ev-add" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+        <input id="e-title" name="title" placeholder="Nuovo impegno, es. Pediatra" maxlength="120" required autocomplete="off">
+        <div class="row" style="margin-top:8px">
+          <input id="e-day" name="day" type="date" value="${sel}" required data-fresh="1">
+          <input id="e-time" name="time" type="time" aria-label="Ora (facoltativa)">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select id="e-who" name="who">${who.map((w) => `<option value="${esc(w)}">${w ? 'Per ' + esc(w) : 'Per chi? (facoltativo)'}</option>`).join('')}</select>
+          <button class="btn">Aggiungi</button>
+        </div></form></div>
+
+    <div class="card"><h2>Prossimi 30 giorni</h2>${upcoming.length ? `<ul class="list">${upcoming.map(eventRow).join('')}</ul>` : '<span class="muted">Niente in programma.</span>'}
+      ${upcoming.length ? '<p style="margin:10px 0 0"><button class="btn ghost" data-act="ev-ics-all">📲 Metti tutti sul calendario del telefono</button></p>' : ''}</div>
+
+    <form class="card" data-form="ev-paste"><h2>🤖 Incolla impegni da Claude</h2>
+      <p class="small muted" style="margin:0 0 8px">Dimmi in chat i tuoi impegni: ti preparo le righe da incollare qui. Una per riga, es.<br><code>12/10 15:30 Pediatra (Bimbi)</code><br><code>15/10 Riunione scuola</code></p>
+      <textarea id="e-paste" name="text" placeholder="12/10 15:30 Pediatra (Bimbi)"></textarea>
+      <p style="margin:10px 0 0"><button class="btn">Aggiungi al calendario</button></p></form>
+
+    ${viewRifiuti()}`;
+}
+
+function viewRifiuti() {
+  const r = rif();
+  const rows = GIORNI.map((g, i) => `<tr><td><b>${g.slice(0, 3)}</b></td><td><div class="chips" style="margin:0">${RIFIUTI.map(([k, ic, nm]) =>
+    `<label class="chip tag small-chip ${(r.days[i] || []).includes(k) ? 'on' : ''}"><input type="checkbox" id="r-${i}-${k}" name="d${i}" value="${k}" ${(r.days[i] || []).includes(k) ? 'checked' : ''} data-fresh="1">${ic} ${nm.split(' ')[0]}</label>`).join('')}</div></td></tr>`).join('');
+  const configured = Object.values(r.days).some((x) => x.length);
+  return `<form class="card" data-form="rif-save"><h2>♻️ Differenziata</h2>
+      <p class="small muted" style="margin:0 0 8px">Segna cosa raccolgono in ogni giorno (vale per tutta la famiglia).</p>
+      <table>${rows}</table>
+      <div class="row" style="margin-top:10px">
+        <select id="r-when" name="when" data-fresh="1"><option value="sera" ${r.when === 'sera' ? 'selected' : ''}>La porto fuori la sera prima</option>
+          <option value="mattina" ${r.when === 'mattina' ? 'selected' : ''}>La porto fuori la mattina stessa</option></select>
+        <input id="r-time" name="time" type="time" value="${esc(rifTime())}" aria-label="Ora del promemoria" data-fresh="1" style="flex:0 0 110px">
+      </div>
+      <p style="margin:12px 0 0"><button class="btn">Salva</button></p>
+    </form>
+    ${configured ? `<div class="card tip"><h2>🔔 Notifiche della differenziata</h2>
+      <p class="small" style="margin:0 0 10px">Aggiungo i promemoria settimanali al calendario del telefono: ti suona all'ora che hai scelto, anche ad app chiusa.</p>
+      <button class="btn" data-act="rif-ics">📲 Aggiungi i promemoria al telefono</button>
+      <p class="small muted" style="margin:10px 0 0">Se cambi i giorni, ripeti questo passaggio e cancella i vecchi promemoria dal calendario del telefono.</p></div>` : ''}`;
+}
+
+// ---------- calendario del telefono (.ics) ----------
+const icsEsc = (s) => String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
+const icsDay = (s) => s.replace(/-/g, '');
+const icsStamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+function icsWrap(vevents) {
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Famiglia//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', ...vevents, 'END:VCALENDAR'].join('\r\n');
+}
+function icsEvent(e) {
+  const lines = ['BEGIN:VEVENT', `UID:evento-${e.id}@famiglia`, `DTSTAMP:${icsStamp()}`, `SUMMARY:${icsEsc(e.title)}`];
+  if (e.time) {
+    const t = hm(e.time).replace(':', '');
+    const end = new Date(parseYmd(e.day).getTime());
+    end.setHours(+t.slice(0, 2) + 1, +t.slice(2));
+    lines.push(`DTSTART:${icsDay(e.day)}T${t}00`, `DTEND:${icsDay(ymd(end))}T${pad(end.getHours())}${pad(end.getMinutes())}00`);
+  } else {
+    lines.push(`DTSTART;VALUE=DATE:${icsDay(e.day)}`, `DTEND;VALUE=DATE:${icsDay(ymd(addDays(parseYmd(e.day), 1)))}`);
+  }
+  if (e.who || e.note) lines.push(`DESCRIPTION:${icsEsc([e.who && 'Per ' + e.who, e.note].filter(Boolean).join(' - '))}`);
+  // promemoria: 1 ora prima, oppure alle 20 della sera prima per gli impegni senza ora
+  lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(e.title)}`, `TRIGGER:${e.time ? '-PT1H' : '-PT4H'}`, 'END:VALARM', 'END:VEVENT');
+  return lines.join('\r\n');
+}
+function icsRifiuti() {
+  const r = rif();
+  const [hh, mm] = rifTime().split(':');
+  const BY = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
+  const out = [];
+  for (let i = 0; i < 7; i++) {
+    const types = r.days[i] || [];
+    if (!types.length) continue;
+    const remindIdx = r.when === 'sera' ? (i + 6) % 7 : i;
+    let d = dayStart(new Date());
+    while (wdIdx(d) !== remindIdx) d = addDays(d, 1);
+    const names = types.map((k) => (RIFIUTI.find((x) => x[0] === k) || [k, '', k])[2]).join(', ');
+    const title = `♻️ ${r.when === 'sera' ? 'Stasera fuori' : 'Fuori stamattina'}: ${names}`;
+    out.push(['BEGIN:VEVENT', `UID:rifiuti-${i}@famiglia`, `DTSTAMP:${icsStamp()}`, `SUMMARY:${icsEsc(title)}`,
+      `DTSTART:${icsDay(ymd(d))}T${hh}${mm}00`, 'DURATION:PT15M', `RRULE:FREQ=WEEKLY;BYDAY=${BY[remindIdx]}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(title)}`, 'TRIGGER:PT0M', 'END:VALARM', 'END:VEVENT'].join('\r\n'));
+  }
+  return icsWrap(out);
+}
+function saveIcs(name, text) {
+  const blob = new Blob([text], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  toast('Apri il file scaricato e scegli "Aggiungi" al calendario');
+}
+
+// "12/10 15:30 Pediatra (Bimbi)" → evento
+function parseLine(line) {
+  const m = line.trim().replace(/^[-•*]\s*/, '').match(/^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?\s+(?:(?:ore\s*)?(\d{1,2})[:.](\d{2})\s+)?(.+)$/i);
+  if (!m) return null;
+  const [, dd, mo, yy, h, mi, rest] = m;
+  const now = new Date();
+  let y = yy ? (+yy < 100 ? 2000 + +yy : +yy) : now.getFullYear();
+  let date = new Date(y, +mo - 1, +dd);
+  if (date.getMonth() !== +mo - 1) return null;
+  if (!yy && daysBetween(date, now) > 60) date = new Date(++y, +mo - 1, +dd);
+  if (h !== undefined && (+h > 23 || +mi > 59)) return null;
+  let title = rest.trim(), who = null;
+  const w = title.match(/\(([^)]{1,40})\)\s*$/);
+  if (w) { who = w[1].trim(); title = title.slice(0, w.index).trim(); }
+  if (!title) return null;
+  return { day: ymd(date), time: h !== undefined ? `${pad(h)}:${mi}` : null, title: title.slice(0, 120), who };
+}
+
 // ---------- azioni ----------
+async function saveDiary(day, patch) {
+  const cur = S.diary.find((x) => x.day === day) || {};
+  const row = { user_id: S.user.id, day, mood: cur.mood ?? null, tags: cur.tags || [], notes: cur.notes ?? null, ...patch };
+  check(await sb.from('diary').upsert(row, { onConflict: 'user_id,day' }));
+  await reload('diary');
+}
+
+app.addEventListener('change', (e) => {
+  // evidenzia subito le scelte (faccine, etichette, giorni della differenziata)
+  const lbl = e.target.closest('label.mood, label.chip');
+  if (!lbl) return;
+  if (e.target.type === 'radio') lbl.parentElement.querySelectorAll('label.mood').forEach((l) => l.classList.toggle('on', l.contains(e.target)));
+  else lbl.classList.toggle('on', e.target.checked);
+});
+
 app.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
@@ -528,9 +840,59 @@ app.addEventListener('click', async (e) => {
     switch (act) {
       case 'tab': S.tab = v; store.set('tab', v); render(); window.scrollTo(0, 0); break;
       case 'htab': S.htab = v; store.set('htab', v); render(); break;
+      case 'ttab': S.ttab = v; store.set('ttab', v); render(); break;
+      case 'go-dieta': S.tab = 'salute'; S.htab = 'dieta'; store.set('tab', 'salute'); store.set('htab', 'dieta'); render(); window.scrollTo(0, 0); break;
+      case 'go-diario': S.tab = 'salute'; S.htab = 'diario'; store.set('tab', 'salute'); store.set('htab', 'diario'); render(); window.scrollTo(0, 0); break;
+      case 'go-ciclo': S.tab = 'salute'; S.htab = 'ciclo'; store.set('tab', 'salute'); store.set('htab', 'ciclo'); render(); window.scrollTo(0, 0); break;
       case 'dweek': S.dietWeek = +v; render(); break;
       case 'filter': S.shopFilter = v; render(); break;
       case 'logout': await sb.auth.signOut(); break;
+
+      case 'mood':
+        await saveDiary(ymd(new Date()), { mood: +v });
+        toast('Segnato nel diario');
+        break;
+      case 'diary-del':
+      case 'cycle-del':
+      case 'w-del':
+      case 'bp-del':
+      case 'wg-del':
+      case 'ev-del': {
+        if (!confirm(act === 'ev-del' ? 'Eliminare questo impegno?' : 'Eliminare questa registrazione?')) return;
+        const [table, key] = {
+          'diary-del': ['diary', 'diary'], 'cycle-del': ['cycle_log', 'cycle'], 'w-del': ['weights', 'weights'],
+          'bp-del': ['blood_pressure', 'bp'], 'wg-del': ['wegovy_log', 'wegovy'], 'ev-del': ['events', 'events'],
+        }[act];
+        check(await sb.from(table).delete().eq('id', +v));
+        await reload(key);
+        break;
+      }
+
+      case 'cal-day': {
+        S.calDay = v;
+        const d = parseYmd(v);
+        S.calMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+        render();
+        break;
+      }
+      case 'cal-month': {
+        const base = S.calMonth || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+        S.calMonth = new Date(base.getFullYear(), base.getMonth() + +v, 1);
+        render();
+        break;
+      }
+      case 'ev-ics': {
+        const ev = S.events.find((x) => x.id === +v);
+        if (ev) saveIcs(`impegno-${ev.day}.ics`, icsWrap([icsEvent(ev)]));
+        break;
+      }
+      case 'ev-ics-all': {
+        const today = ymd(new Date());
+        const list = S.events.filter((x) => x.day >= today);
+        if (list.length) saveIcs('impegni-famiglia.ics', icsWrap(list.map(icsEvent)));
+        break;
+      }
+      case 'rif-ics': saveIcs('differenziata.ics', icsRifiuti()); break;
 
       case 'shop-toggle': {
         const it = S.shopping.find((i) => i.id === +v);
@@ -573,16 +935,6 @@ app.addEventListener('click', async (e) => {
         S.tasks = S.tasks.filter((t) => t.id !== +v); render();
         check(await sb.from('tasks').delete().eq('id', +v));
         break;
-
-      case 'w-del':
-      case 'bp-del':
-      case 'wg-del': {
-        if (!confirm('Eliminare questa registrazione?')) return;
-        const [table, key] = { 'w-del': ['weights', 'weights'], 'bp-del': ['blood_pressure', 'bp'], 'wg-del': ['wegovy_log', 'wegovy'] }[act];
-        check(await sb.from(table).delete().eq('id', +v));
-        await reload(key);
-        break;
-      }
     }
   } catch (err) {
     fail(err);
@@ -594,15 +946,23 @@ app.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
   e.preventDefault();
-  const fd = Object.fromEntries(new FormData(form));
-  const btn = form.querySelector('button');
+  const formData = new FormData(form);
+  const fd = Object.fromEntries(formData);
+  const btn = form.querySelector('button:not([type=button])');
   if (btn) btn.disabled = true;
   try {
     switch (form.dataset.form) {
       case 'login': {
         store.set('remember', fd.remember ? '1' : '0');
-        const { data, error } = await sb.auth.signInWithPassword({ email: fd.email.trim(), password: fd.password });
-        if (error) { toast('Email o password sbagliate'); break; }
+        const { data, error } = await sb.auth.signInWithPassword({ email: fd.email.trim().toLowerCase(), password: fd.password });
+        if (error) {
+          const msg = /not confirmed/i.test(error.message) ? 'Questo account non è ancora confermato: va confermato su Supabase.'
+            : /invalid login/i.test(error.message) ? 'Email o password sbagliate.'
+            : navigator.onLine ? `Accesso non riuscito (${error.message}).` : 'Sei offline: controlla la connessione.';
+          const p = document.getElementById('l-err');
+          if (p) { p.textContent = msg; p.hidden = false; }
+          break;
+        }
         await start(data.user);
         break;
       }
@@ -619,7 +979,7 @@ app.addEventListener('submit', async (e) => {
         document.getElementById('s-name')?.focus();
         break;
       case 'task-add':
-        check(await sb.from('tasks').insert({ title: fd.title.trim(), due: fd.due || null, assignee: fd.assignee || null }));
+        check(await sb.from('tasks').insert({ title: fd.title.trim(), due: fd.due || null, assignee: fd.assignee || null, kind: S.ttab }));
         form.reset();
         await reload('tasks');
         toast('Aggiunto');
@@ -648,6 +1008,43 @@ app.addEventListener('submit', async (e) => {
         await reload('wegovy');
         toast('Puntura segnata');
         break;
+      case 'diary-save':
+        await saveDiary(fd.day, { mood: fd.mood ? +fd.mood : null, tags: formData.getAll('tag'), notes: fd.notes?.trim() || null });
+        toast('Diario salvato');
+        break;
+      case 'cycle-add': {
+        const { error } = await sb.from('cycle_log').insert({ start_day: fd.day });
+        if (error && error.code !== '23505') throw error;
+        await reload('cycle');
+        toast('Ciclo segnato');
+        break;
+      }
+      case 'ev-add':
+        check(await sb.from('events').insert({ title: fd.title.trim(), day: fd.day, time: fd.time || null, who: fd.who || null }));
+        S.calDay = fd.day;
+        form.reset();
+        await reload('events');
+        toast('Impegno aggiunto');
+        break;
+      case 'ev-paste': {
+        const lines = String(fd.text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const rows = lines.map(parseLine);
+        const ok = rows.filter(Boolean);
+        if (!ok.length) { toast('Non ho capito le righe: usa il formato 12/10 15:30 Titolo'); break; }
+        check(await sb.from('events').insert(ok));
+        form.reset();
+        await reload('events');
+        toast(`Aggiunti ${ok.length} impegni${ok.length < lines.length ? ` · ${lines.length - ok.length === 1 ? '1 riga non capita' : (lines.length - ok.length) + ' righe non capite'}` : ''}`);
+        break;
+      }
+      case 'rif-save': {
+        const days = {};
+        for (let i = 0; i < 7; i++) { const t = formData.getAll(`d${i}`); if (t.length) days[i] = t; }
+        check(await sb.from('app_settings').upsert({ key: 'rifiuti', value: { days, when: fd.when, time: fd.time || '' } }));
+        await reload('settings');
+        toast('Differenziata salvata');
+        break;
+      }
       case 'diet-settings': {
         const follows = !!fd.follow;
         if (fd.start && fd.start !== dietStart()) {
