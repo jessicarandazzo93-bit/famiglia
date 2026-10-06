@@ -12,6 +12,10 @@ const authStorage = {
   setItem(k, v) { try { (remember() ? localStorage : sessionStorage).setItem(k, v); } catch { /* niente */ } },
   removeItem(k) { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch { /* niente */ } },
 };
+// Link arrivati per email (invito o "password dimenticata"): li leggo prima che Supabase pulisca l'indirizzo
+const linkParams = new URLSearchParams(location.hash.slice(1));
+const linkType = linkParams.get('type'); // 'invite' | 'recovery'
+const linkError = linkParams.get('error_code');
 const sb = configured
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storage: authStorage, persistSession: true, autoRefreshToken: true } })
   : null;
@@ -215,8 +219,40 @@ async function boot() {
     }
   });
   const { data } = await sb.auth.getSession();
-  if (data.session) await start(data.session.user);
-  else renderLogin();
+  if (data.session && (linkType === 'invite' || linkType === 'recovery')) renderSetPassword(linkType);
+  else if (data.session) await start(data.session.user);
+  else {
+    renderLogin();
+    if (linkError) {
+      showLoginMsg(linkError === 'otp_expired'
+        ? 'Il link della mail è scaduto o già usato. Scrivi la tua email qui sopra e tocca "Password dimenticata?" per riceverne uno nuovo.'
+        : 'Il link della mail non è valido. Scrivi la tua email e tocca "Password dimenticata?".');
+    }
+  }
+}
+
+function showLoginMsg(msg, ok) {
+  const p = document.getElementById('l-err');
+  if (!p) return;
+  p.textContent = msg;
+  p.style.color = ok ? 'var(--green)' : 'var(--red)';
+  p.hidden = false;
+}
+
+function renderSetPassword(type) {
+  history.replaceState(null, '', location.pathname);
+  app.innerHTML = `<div class="login">
+    <div class="logo">🔑</div>
+    <h1 style="text-align:center">${type === 'invite' ? 'Benvenuto/a!' : 'Nuova password'}</h1>
+    <p class="muted" style="text-align:center">Scegli la password che userai per entrare</p>
+    <form class="card" data-form="set-pass">
+      <label class="f" for="sp-1">Password (almeno 8 caratteri)</label>
+      <input id="sp-1" name="p1" type="password" autocomplete="new-password" minlength="8" required>
+      <label class="f" for="sp-2">Riscrivila</label>
+      <input id="sp-2" name="p2" type="password" autocomplete="new-password" minlength="8" required>
+      <p style="margin:14px 0 0"><button class="btn full">Salva ed entra</button></p>
+      <p id="l-err" class="small" style="color:var(--red);margin:10px 0 0" hidden></p>
+    </form></div>`;
 }
 
 async function start(user) {
@@ -262,6 +298,7 @@ function renderLogin() {
       </label>
       <p style="margin:14px 0 0"><button class="btn full">Entra</button></p>
       <p id="l-err" class="small" style="color:var(--red);margin:10px 0 0" hidden></p>
+      <p style="margin:10px 0 0;text-align:center"><button type="button" class="linkbtn" data-act="forgot">Password dimenticata? / Primo accesso</button></p>
     </form></div>`;
 }
 
@@ -893,6 +930,14 @@ app.addEventListener('click', async (e) => {
       case 'dweek': S.dietWeek = +v; render(); break;
       case 'filter': S.shopFilter = v; render(); break;
       case 'logout': await sb.auth.signOut(); break;
+      case 'forgot': {
+        const email = document.getElementById('l-email')?.value.trim().toLowerCase();
+        if (!email || !email.includes('@')) { showLoginMsg('Scrivi prima la tua email qui sopra, poi tocca di nuovo.'); return; }
+        const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+        if (error) { showLoginMsg(/rate|seconds/i.test(error.message) ? 'Troppe richieste ravvicinate: riprova tra qualche minuto.' : `Invio non riuscito (${error.message}).`); return; }
+        showLoginMsg(`Fatto! Se ${email} è registrata, arriva una mail da Supabase: apri il link e scegli la password. Guarda anche nello spam.`, true);
+        return;
+      }
 
       case 'mood':
         await saveDiary(ymd(new Date()), { mood: +v });
@@ -1005,10 +1050,17 @@ app.addEventListener('submit', async (e) => {
           const msg = /not confirmed/i.test(error.message) ? 'Questo account non è ancora confermato: va confermato su Supabase.'
             : /invalid login/i.test(error.message) ? 'Email o password sbagliate.'
             : navigator.onLine ? `Accesso non riuscito (${error.message}).` : 'Sei offline: controlla la connessione.';
-          const p = document.getElementById('l-err');
-          if (p) { p.textContent = msg; p.hidden = false; }
+          showLoginMsg(msg);
           break;
         }
+        await start(data.user);
+        break;
+      }
+      case 'set-pass': {
+        if (fd.p1 !== fd.p2) { showLoginMsg('Le due password non sono uguali.'); break; }
+        const { data, error } = await sb.auth.updateUser({ password: fd.p1 });
+        if (error) { showLoginMsg(/weak|pwned|leaked/i.test(error.message) ? 'Password troppo facile o già finita in furti di dati: scegline un\'altra.' : `Non riuscito (${error.message}).`); break; }
+        toast('Password salvata ✅');
         await start(data.user);
         break;
       }
