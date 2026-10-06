@@ -125,7 +125,8 @@ function isHoliday(date) {
   holidayCache[y] ||= new Set([...['01-01', '01-06', '04-25', '05-01', '06-02', '08-15', '11-01', '12-08', '12-25', '12-26'].map((md) => `${y}-${md}`), ymd(addDays(easter(y), 1))]);
   return holidayCache[y].has(ymd(date));
 }
-const rifTime = () => rif().time || (rif().when === 'sera' ? '20:30' : '07:00');
+const rem = () => ({ before: 60, allday: 'sera', alldayTime: '20:00', ...(S.mine.reminders || {}) });
+const rifTime = () => rem().rif || rif().time || (rif().when === 'sera' ? '20:30' : '07:00');
 
 // Ciclo: previsione a 28 giorni dall'ultimo inizio
 function cycleInfo() {
@@ -778,12 +779,33 @@ function viewCalendario() {
     <div class="card"><h2>Prossimi 30 giorni</h2>${upcoming.length ? `<ul class="list">${upcoming.map(eventRow).join('')}</ul>` : '<span class="muted">Niente in programma.</span>'}
       ${upcoming.length ? '<p style="margin:10px 0 0"><button class="btn ghost" data-act="ev-ics-all">📲 Metti tutti sul calendario del telefono</button></p>' : ''}</div>
 
+    ${viewPromemoria()}
+
     <form class="card" data-form="ev-paste"><h2>🤖 Incolla impegni da Claude</h2>
       <p class="small muted" style="margin:0 0 8px">Dimmi in chat i tuoi impegni: ti preparo le righe da incollare qui. Una per riga, es.<br><code>12/10 15:30 Pediatra (Bimbi)</code><br><code>15/10 Riunione scuola</code></p>
       <textarea id="e-paste" name="text" placeholder="12/10 15:30 Pediatra (Bimbi)"></textarea>
       <p style="margin:10px 0 0"><button class="btn">Aggiungi al calendario</button></p></form>
 
     ${viewRifiuti()}`;
+}
+
+function viewPromemoria() {
+  const r = rem();
+  const befores = [[15, '15 minuti'], [30, '30 minuti'], [60, '1 ora'], [120, '2 ore'], [180, '3 ore'], [1440, '1 giorno']];
+  return `<form class="card" data-form="rem-save"><h2>🔔 I miei promemoria</h2>
+      <p class="small muted" style="margin:0 0 4px">Orari solo tuoi: tuo marito può scegliere i suoi.</p>
+      <label class="f" for="m-before">Impegni con orario: avvisami</label>
+      <select id="m-before" name="before" data-fresh="1">${befores.map(([v, l]) => `<option value="${v}" ${+r.before === v ? 'selected' : ''}>${l} prima</option>`).join('')}</select>
+      <label class="f" for="m-allday">Impegni senza orario: avvisami</label>
+      <div class="row">
+        <select id="m-allday" name="allday" data-fresh="1"><option value="sera" ${r.allday === 'sera' ? 'selected' : ''}>la sera prima</option>
+          <option value="mattina" ${r.allday === 'mattina' ? 'selected' : ''}>la mattina stessa</option></select>
+        <input id="m-allday-t" name="alldayTime" type="time" value="${esc(r.alldayTime)}" data-fresh="1" style="flex:0 0 110px" aria-label="Ora">
+      </div>
+      <label class="f" for="m-rif">Differenziata: avvisami alle</label>
+      <input id="m-rif" name="rif" type="time" value="${esc(rifTime())}" data-fresh="1" style="max-width:140px">
+      <p style="margin:12px 0 0"><button class="btn">Salva</button></p>
+      <p class="small muted" style="margin:8px 0 0">Dopo aver cambiato gli orari, rimetti i promemoria sul telefono con i bottoni 📲.</p></form>`;
 }
 
 function viewRifiuti() {
@@ -808,7 +830,6 @@ function viewRifiuti() {
       <div class="row" style="margin-top:10px">
         <select id="r-when" name="when" data-fresh="1"><option value="sera" ${r.when === 'sera' ? 'selected' : ''}>La porto fuori la sera prima</option>
           <option value="mattina" ${r.when === 'mattina' ? 'selected' : ''}>La porto fuori la mattina stessa</option></select>
-        <input id="r-time" name="time" type="time" value="${esc(rifTime())}" aria-label="Ora del promemoria" data-fresh="1" style="flex:0 0 110px">
       </div>
       <p style="margin:12px 0 0"><button class="btn">Salva</button></p>
     </form>
@@ -825,6 +846,14 @@ const icsStamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\.
 function icsWrap(vevents) {
   return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Famiglia//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', ...vevents, 'END:VCALENDAR'].join('\r\n');
 }
+// Quando suona l'avviso: con orario X minuti prima; senza orario la sera prima o la mattina, all'ora scelta
+function eventTrigger(timed) {
+  const r = rem();
+  if (timed) return r.before >= 1440 ? `-P${Math.round(r.before / 1440)}D` : `-PT${r.before}M`;
+  const [h, m] = (r.alldayTime || '20:00').split(':').map(Number);
+  const mins = h * 60 + m;
+  return r.allday === 'mattina' ? `PT${mins}M` : `-PT${24 * 60 - mins}M`;
+}
 function icsEvent(e) {
   const lines = ['BEGIN:VEVENT', `UID:evento-${e.id}@famiglia`, `DTSTAMP:${icsStamp()}`, `SUMMARY:${icsEsc(e.title)}`];
   if (e.time) {
@@ -836,8 +865,8 @@ function icsEvent(e) {
     lines.push(`DTSTART;VALUE=DATE:${icsDay(e.day)}`, `DTEND;VALUE=DATE:${icsDay(ymd(addDays(parseYmd(e.day), 1)))}`);
   }
   if (e.who || e.note) lines.push(`DESCRIPTION:${icsEsc([e.who && 'Per ' + e.who, e.note].filter(Boolean).join(' - '))}`);
-  // promemoria: 1 ora prima, oppure alle 20 della sera prima per gli impegni senza ora
-  lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(e.title)}`, `TRIGGER:${e.time ? '-PT1H' : '-PT4H'}`, 'END:VALARM', 'END:VEVENT');
+  // promemoria secondo le preferenze (Calendario → Promemoria)
+  lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(e.title)}`, `TRIGGER:${eventTrigger(!!e.time)}`, 'END:VALARM', 'END:VEVENT');
   return lines.join('\r\n');
 }
 function icsRifiuti() {
@@ -1135,6 +1164,13 @@ app.addEventListener('submit', async (e) => {
         toast(`Aggiunti ${ok.length} impegni${ok.length < lines.length ? ` · ${lines.length - ok.length === 1 ? '1 riga non capita' : (lines.length - ok.length) + ' righe non capite'}` : ''}`);
         break;
       }
+      case 'rem-save': {
+        const reminders = { before: +fd.before || 60, allday: fd.allday === 'mattina' ? 'mattina' : 'sera', alldayTime: fd.alldayTime || '20:00', rif: fd.rif || '' };
+        check(await sb.from('user_settings').upsert({ user_id: S.user.id, follows_diet: S.mine.follows_diet, height_cm: S.mine.height_cm, goal_kg: S.mine.goal_kg, reminders }));
+        await reload('mine');
+        toast('Orari salvati: ora rimetti i promemoria sul telefono 📲');
+        break;
+      }
       case 'rif-save': {
         const days = {}, alt = {};
         for (let i = 0; i < 7; i++) {
@@ -1142,7 +1178,7 @@ app.addEventListener('submit', async (e) => {
           if (t.length) days[i] = t;
           if (t.length && fd[`alt${i}`]) alt[i] = fd[`alt${i}`];
         }
-        check(await sb.from('app_settings').upsert({ key: 'rifiuti', value: { days, alt, when: fd.when, time: fd.time || '' } }));
+        check(await sb.from('app_settings').upsert({ key: 'rifiuti', value: { days, alt, when: fd.when, time: rif().time || '' } }));
         await reload('settings');
         toast('Differenziata salvata');
         break;

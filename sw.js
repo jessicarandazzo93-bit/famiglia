@@ -1,5 +1,5 @@
 ﻿// Network-first: gli aggiornamenti arrivano subito, la cache serve solo offline.
-const CACHE = 'famiglia-v5';
+const CACHE = 'famiglia-v6';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './diet.js', './config.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
