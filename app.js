@@ -1,5 +1,5 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, DEFAULT_DIET_START } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, DEFAULT_DIET_START, VAPID_PUBLIC } from './config.js';
 import { DIET, QUICK } from './diet.js';
 
 const app = document.getElementById('app');
@@ -143,6 +143,83 @@ function cycleInfo() {
   };
 }
 
+// ---------- notifiche push ----------
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+// non resto mai bloccata se il service worker non è (ancora) attivo
+const swReady = () => Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error('sw-timeout')), 4000))]);
+const b64uBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+
+// S.push: 'on' | 'off' | 'denied' | 'need-install' (iPhone da Safari) | 'unsupported'
+async function checkPush() {
+  if (!pushSupported()) { S.push = isIOS && !isStandalone() ? 'need-install' : 'unsupported'; return; }
+  if (Notification.permission === 'denied') { S.push = 'denied'; return; }
+  try {
+    const reg = await swReady();
+    const sub = await reg.pushManager.getSubscription();
+    S.push = sub && Notification.permission === 'granted' ? 'on' : 'off';
+    if (sub && S.push === 'on') await saveSubscription(sub); // tiene il telefono collegato all'account giusto
+  } catch { S.push = 'off'; }
+}
+async function saveSubscription(sub) {
+  const j = sub.toJSON();
+  check(await sb.from('push_subscriptions').upsert(
+    { user_id: S.user.id, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, device: isIOS ? 'iPhone' : navigator.platform || 'web' },
+    { onConflict: 'endpoint' },
+  ));
+}
+async function enablePush() {
+  const perm = await Notification.requestPermission(); // deve partire subito dal tocco (iPhone)
+  if (perm !== 'granted') { S.push = perm === 'denied' ? 'denied' : 'off'; render(); return; }
+  const reg = await swReady();
+  const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) }));
+  await saveSubscription(sub);
+  S.push = 'on';
+  render();
+  toast('Notifiche attive 🔔');
+}
+async function disablePush() {
+  const reg = await swReady();
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    await sub.unsubscribe();
+  }
+  S.push = 'off';
+  render();
+  toast('Notifiche disattivate su questo telefono');
+}
+async function testPush() {
+  const { data, error } = await sb.functions.invoke('notifiche', { body: { test: true } });
+  if (error) throw error;
+  toast(data?.sent ? 'Inviata! Dovrebbe arrivare tra pochi secondi' : 'Nessun telefono collegato: attiva prima le notifiche');
+}
+
+function pushCard(compact) {
+  const p = S.push;
+  if (p === 'on') {
+    return compact ? '' : `<div class="card tip"><h2>🔔 Notifiche attive su questo telefono</h2>
+      <p class="small" style="margin:0 0 10px">Ti arrivano da sole: differenziata e impegni, agli orari scelti qui sotto.</p>
+      <div class="row"><button class="btn ghost" data-act="push-test">Manda una prova</button><button class="btn danger" data-act="push-off">Disattiva</button></div></div>`;
+  }
+  if (p === 'need-install') {
+    return `<div class="card warn"><h2>🔔 Per avere le notifiche</h2>
+      <p class="small" style="margin:0">Su iPhone le notifiche funzionano solo dall'app installata:
+      in Safari tocca <b>Condividi ⬆️ → Aggiungi alla schermata Home</b>, poi apri l'app dall'icona 🏡 e torna qui.</p></div>`;
+  }
+  if (p === 'denied') {
+    return `<div class="card warn"><h2>🔕 Notifiche bloccate</h2>
+      <p class="small" style="margin:0">Le hai rifiutate su questo telefono. Per riattivarle: <b>Impostazioni → Notifiche → Famiglia → Consenti notifiche</b>.</p></div>`;
+  }
+  if (p === 'off') {
+    return `<div class="card tip"><h2>🔔 Attiva le notifiche</h2>
+      <p class="small" style="margin:0 0 10px">Ti avviso io per la differenziata e gli impegni, anche ad app chiusa.</p>
+      <button class="btn" data-act="push-on">Attiva notifiche</button></div>`;
+  }
+  return '';
+}
+
 // ---------- dati ----------
 const since = () => new Date(Date.now() - 7 * 86400000).toISOString();
 const loaders = {
@@ -263,6 +340,7 @@ async function start(user) {
     await Promise.all(Object.values(loaders).map((f) => f()));
     if (!S.profiles[user.id]) { renderName(); return; }
     await ensureDietShopping();
+    await checkPush();
     render();
     subscribe();
   } catch (e) {
@@ -369,6 +447,7 @@ function viewOggi() {
   const h = now.getHours();
   const saluto = h < 12 ? 'Buongiorno' : h < 18 ? 'Buon pomeriggio' : 'Buonasera';
   let out = `<h1>${saluto} ☀️</h1><div class="muted" style="text-transform:capitalize">${fmtLong(today)}</div>`;
+  out += pushCard(true);
 
   // Differenziata
   const r = rif();
@@ -779,6 +858,7 @@ function viewCalendario() {
     <div class="card"><h2>Prossimi 30 giorni</h2>${upcoming.length ? `<ul class="list">${upcoming.map(eventRow).join('')}</ul>` : '<span class="muted">Niente in programma.</span>'}
       ${upcoming.length ? '<p style="margin:10px 0 0"><button class="btn ghost" data-act="ev-ics-all">📲 Metti tutti sul calendario del telefono</button></p>' : ''}</div>
 
+    ${pushCard(false)}
     ${viewPromemoria()}
 
     <form class="card" data-form="ev-paste"><h2>🤖 Incolla impegni da Claude</h2>
@@ -959,6 +1039,9 @@ app.addEventListener('click', async (e) => {
       case 'dweek': S.dietWeek = +v; render(); break;
       case 'filter': S.shopFilter = v; render(); break;
       case 'logout': await sb.auth.signOut(); break;
+      case 'push-on': await enablePush(); break;
+      case 'push-off': await disablePush(); break;
+      case 'push-test': await testPush(); break;
       case 'forgot': {
         const email = document.getElementById('l-email')?.value.trim().toLowerCase();
         if (!email || !email.includes('@')) { showLoginMsg('Scrivi prima la tua email qui sopra, poi tocca di nuovo.'); return; }
